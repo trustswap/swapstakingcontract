@@ -1,4 +1,4 @@
-pragma solidity ^0.6.0;
+pragma solidity 0.6.2;
 
 import "@openzeppelin/contracts-ethereum-package/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts-ethereum-package/contracts/math/Math.sol";
@@ -16,16 +16,15 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
     using Address for address;
     using Arrays for uint256[];
 
-    uint256 private constant pointMultiplier = 10 ** 18;
-
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-    bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
-    bytes32 public constant REWARDS_DISTRIBUTOR_ROLE = keccak256("REWARDS_DISTRIBUTOR_ROLE");
+    bytes32 private constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 private constant OWNER_ROLE = keccak256("OWNER_ROLE");
+    bytes32 private constant REWARDS_DISTRIBUTOR_ROLE = keccak256("REWARDS_DISTRIBUTOR_ROLE");
 
     // EVENTS
     event StakeDeposited(address indexed account, uint256 amount);
     event WithdrawInitiated(address indexed account, uint256 amount);
     event WithdrawExecuted(address indexed account, uint256 amount, uint256 reward);
+    event RewardsDistributed(uint256 amount);
 
     // STRUCT DECLARATIONS
     struct StakeDeposit {
@@ -45,10 +44,10 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
     uint256 public unstakingPeriod;
 
     //reward calculations
-    uint256 public totalRewardPoints;
-    uint256 public lastRewardsDistTimestamp;
+    uint256 private totalRewardPoints;
     uint256 public rewardsDistributed;
     uint256 public rewardsWithdrawn;
+    uint256 public totalRewardsDistributed;
 
     mapping(address => StakeDeposit) private _stakeDeposits;
 
@@ -78,6 +77,10 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
     internal
     initializer
     {
+        require(
+            _token != address(0),
+            "[Validation] Invalid swap token address"
+        );
         require(_maxStakingAmount > 0, "[Validation] _maxStakingAmount has to be larger than 0");
         __Context_init_unchained();
         __AccessControl_init_unchained();
@@ -134,11 +137,15 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
     whenPaused
     {
         require(hasRole(OWNER_ROLE, _msgSender()), "[Validation] The caller must have owner role to set token address");
+        require(
+            _token != address(0),
+            "[Validation] Invalid swap token address"
+        );
         token = IERC20(_token);
     }
 
     function deposit(uint256 amount)
-    public
+    external
     nonReentrant
     whenNotPaused
     guardMaxStakingLimit(amount)
@@ -181,7 +188,7 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
     nonReentrant
     whenNotPaused
     {
-        StakeDeposit storage stakeDeposit = _stakeDeposits[msg.sender];
+        StakeDeposit memory stakeDeposit = _stakeDeposits[msg.sender];
         require(stakeDeposit.exists && stakeDeposit.amount != 0, "[Withdraw] There is no stake deposit for this account");
         require(stakeDeposit.endDate != 0, "[Withdraw] Withdraw is not initialized");
 
@@ -192,10 +199,7 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
         uint256 amount = stakeDeposit.amount;
         uint256 reward = _computeReward(stakeDeposit);
 
-        stakeDeposit.amount = 0;
-        stakeDeposit.exists = false;
-        stakeDeposit.entryRewardPoints = 0;
-        stakeDeposit.exitRewardPoints = 0;
+        delete _stakeDeposits[msg.sender];
 
         //calculate withdrawed rewards in single distribution cycle
         rewardsWithdrawn = rewardsWithdrawn.add(reward);
@@ -235,24 +239,22 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
             //withdrawal is initiated
             rewardsPoints = stakeDeposit.exitRewardPoints.sub(stakeDeposit.entryRewardPoints);
         }
-        return stakeDeposit.amount.mul(rewardsPoints).div(pointMultiplier:q
+        return stakeDeposit.amount.mul(rewardsPoints).div(10 ** 18);
     }
 
     function distributeRewards()
     external
     nonReentrant
     whenNotPaused
-    returns (bool success)
     {
         require(hasRole(REWARDS_DISTRIBUTOR_ROLE, _msgSender()),
             "[Validation] The caller must have rewards distributor role");
-        return _distributeRewards();
+        _distributeRewards();
     }
 
     function _distributeRewards()
     private
     whenNotPaused
-    returns (bool success)
     {
         require(hasRole(REWARDS_DISTRIBUTOR_ROLE, _msgSender()),
             "[Validation] The caller must have rewards distributor role");
@@ -261,17 +263,16 @@ contract SwapStakingContract is Initializable, ContextUpgradeSafe, AccessControl
         require(rewardPoolBalance > 0, "[Validation] not enough rewards accumulated");
 
         uint256 newlyAdded = rewardPoolBalance.add(rewardsWithdrawn).sub(rewardsDistributed);
-        uint256 ratio = newlyAdded.mul(pointMultiplier).div(currentTotalStake);
+        uint256 ratio = newlyAdded.mul(10 ** 18).div(currentTotalStake);
         totalRewardPoints = totalRewardPoints.add(ratio);
         rewardsDistributed = rewardPoolBalance;
         rewardsWithdrawn = 0;
-        lastRewardsDistTimestamp = block.timestamp;
-        return true;
+        totalRewardsDistributed = totalRewardsDistributed.add(newlyAdded);
+        
+        emit RewardsDistributed(newlyAdded);
     }
 
     function version() public pure returns (string memory) {
         return "v1";
     }
-
-    uint256[50] private __gap;
 }
